@@ -1,0 +1,168 @@
+// the tutorial I used: 
+// https://randomnerdtutorials.com/esp32-multiple-ds18b20-temperature-sensors/
+// code largely based on the example code there
+// obviously you need to have the correct libraries n stuff
+
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <WiFi.h>
+#include <PubSubClient.h>
+
+// WiFi credentials
+const char* ssid = "ssid_name_here";
+const char* password = "inser_pw";
+
+// MQTT Broker settings
+const char* mqtt_server = "Your.HA.IP.HERE"; 
+const int mqtt_port = 1883;
+const char* mqtt_user = "homeassistant";   // Optional
+const char* mqtt_password = "Your HA PWD";  // Optional
+const char* mqtt_client_id = "esp32_temp_sensors";
+
+// MQTT Topics - simplified format like your geophone project
+const char* temp1_topic = "esp32temp/sensor1";
+const char* temp2_topic = "esp32temp/sensor2";
+
+// DS18B20 Setup
+#define ONE_WIRE_BUS 4
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+// replace these adresses with the ones of your sensors
+DeviceAddress sensor1 = { 0x28, 0xFF, 0x64, 0x1F, 0x49, 0x95, 0xF2, 0xAF };
+DeviceAddress sensor2 = { 0x28, 0xFF, 0x64, 0x1F, 0x49, 0x97, 0x60, 0x93 };
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+unsigned long lastMsg = 0;
+const long interval = 60000;  // 60 seconds
+
+// Increase MQTT buffer size for larger payloads
+#define MQTT_MAX_PACKET_SIZE 512
+
+void setup_wifi() {
+  delay(10);
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  
+  WiFi.begin(ssid, password);
+  
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void reconnect() {
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    if (client.connect(mqtt_client_id, mqtt_user, mqtt_password)) {
+      Serial.println("connected");
+      
+      // Publish discovery messages for Home Assistant auto-discovery
+      publishDiscovery();
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      delay(5000);
+    }
+  }
+}
+
+void publishDiscovery() {
+  Serial.println("Publishing discovery messages...");
+  
+  // Auto-discovery config for sensor 1 - matching your geophone format
+  String discovery1 = "{\"name\":\"Temperature Sensor 1\","
+                      "\"state_topic\":\"esp32temp/sensor1\","
+                      "\"unique_id\":\"esp32_temp_sensor_1\","
+                      "\"unit_of_measurement\":\"°C\","
+                      "\"device_class\":\"temperature\","
+                      "\"state_class\":\"measurement\","
+                      "\"device\":{\"identifiers\":[\"esp32temp\"],\"name\":\"ESP32 Temperature Sensors\",\"manufacturer\":\"ESP32\",\"model\":\"DS18B20\"}}";
+  
+  bool pub1 = client.publish("homeassistant/sensor/esp32temp1/config", discovery1.c_str(), true);
+  Serial.print("Sensor 1 discovery published to homeassistant/sensor/esp32temp1/config: ");
+  Serial.println(pub1 ? "SUCCESS" : "FAILED");
+  delay(100);
+  
+  // Auto-discovery config for sensor 2
+  String discovery2 = "{\"name\":\"Temperature Sensor 2\","
+                      "\"state_topic\":\"esp32temp/sensor2\","
+                      "\"unique_id\":\"esp32_temp_sensor_2\","
+                      "\"unit_of_measurement\":\"°C\","
+                      "\"device_class\":\"temperature\","
+                      "\"state_class\":\"measurement\","
+                      "\"device\":{\"identifiers\":[\"esp32temp\"],\"name\":\"ESP32 Temperature Sensors\",\"manufacturer\":\"ESP32\",\"model\":\"DS18B20\"}}";
+  
+  bool pub2 = client.publish("homeassistant/sensor/esp32temp2/config", discovery2.c_str(), true);
+  Serial.print("Sensor 2 discovery published to homeassistant/sensor/esp32temp2/config: ");
+  Serial.println(pub2 ? "SUCCESS" : "FAILED");
+  delay(100);
+  
+  Serial.println("Discovery messages complete");
+}
+
+void setup(void) {
+  Serial.begin(115200);
+  sensors.begin();
+  
+  // Set MQTT buffer size BEFORE connecting
+  client.setBufferSize(512);
+  
+  setup_wifi();
+  client.setServer(mqtt_server, mqtt_port);
+  client.setKeepAlive(60);
+  client.setSocketTimeout(30);
+  
+  // Wait a bit for connection to stabilize
+  delay(2000);
+}
+
+void loop(void) {
+  // Maintain MQTT connection
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop();  // CRITICAL: Must be called frequently!
+  
+  unsigned long now = millis();
+  if (now - lastMsg > interval) {
+    lastMsg = now;
+    
+    Serial.print("Requesting temperatures...");
+    sensors.requestTemperatures();
+    Serial.println("DONE");
+    
+    float temp1C = sensors.getTempC(sensor1);
+    float temp2C = sensors.getTempC(sensor2);
+    
+    Serial.print("Sensor 1(*C): ");
+    Serial.print(temp1C);
+    Serial.print(" Sensor 2(*C): ");
+    Serial.println(temp2C);
+    
+    // Publish to MQTT
+    char temp1_str[8];
+    char temp2_str[8];
+    dtostrf(temp1C, 6, 2, temp1_str);
+    dtostrf(temp2C, 6, 2, temp2_str);
+    
+    bool success1 = client.publish(temp1_topic, temp1_str, true);
+    bool success2 = client.publish(temp2_topic, temp2_str, true);
+    
+    if (success1 && success2) {
+      Serial.println("Temperatures published to MQTT");
+    } else {
+      Serial.println("Failed to publish temperatures");
+    }
+  }
+}
